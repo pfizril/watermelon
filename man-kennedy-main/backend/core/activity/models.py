@@ -53,4 +53,19 @@ class Activity(models.Model):
         verbose_name_plural = 'Activities'
 
     def __str__(self):
-        return f"{self.user.username}'s {self.activity_type} activity" 
+        return f"{self.user.username}'s {self.activity_type} activity"
+
+class FocusSession(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='focus_sessions')
+    start_time = models.DateTimeField()
+    end_time = models.DateTimeField(null=True, blank=True)
+    duration_seconds = models.IntegerField(default=0)  # Duration in seconds
+    focus_mode = models.CharField(max_length=20, default='medium')  # short, medium, long
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['-start_time']
+        verbose_name_plural = 'Focus Sessions'
+    
+    def __str__(self):
+        return f"{self.user.email} - Focus Session ({self.start_time})"

@@ -28,6 +28,7 @@ import { useRouter } from "next/navigation"
 import Link from "next/link"
 import { useAuth } from "@/lib/auth"
 import { api, Quote, CalendarEvent } from "@/lib/api"
+import { NotificationService } from "@/lib/notifications"
 
 interface Task {
   id: string
@@ -40,8 +41,15 @@ export default function Dashboard() {
   const [pomodoroTime, setPomodoroTime] = useState(25 * 60) // 25 minutes in seconds
   const [isRunning, setIsRunning] = useState(false)
   const [isBreak, setIsBreak] = useState(false)
+  const [focusMode, setFocusMode] = useState<'short' | 'medium' | 'long'>('medium')
+  const [breakDuration, setBreakDuration] = useState(5) // minutes
+  const [totalFocusTime, setTotalFocusTime] = useState(0) // Total focus time in seconds
+  const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null)
+  const [currentFocusSessionId, setCurrentFocusSessionId] = useState<number | null>(null)
   const [tasks, setTasks] = useState<Task[]>([])
+  const [tasksLoading, setTasksLoading] = useState(false)
   const [todayMood, setTodayMood] = useState<string | null>(null)
+  const [moodLoading, setMoodLoading] = useState(false)
   const [quote, setQuote] = useState<Quote | null>(null)
   const [quoteLoading, setQuoteLoading] = useState(false)
   const [quoteError, setQuoteError] = useState<string | null>(null)
@@ -49,6 +57,13 @@ export default function Dashboard() {
   const [eventsLoading, setEventsLoading] = useState(false)
   const router = useRouter()
   const { user, logout } = useAuth()
+
+  // Pomodoro mode configurations
+  const pomodoroModes = {
+    short: 15 * 60, // 15 minutes
+    medium: 25 * 60, // 25 minutes
+    long: 45 * 60, // 45 minutes
+  }
 
   // Fetch motivational quote
   const fetchQuote = async () => {
@@ -76,27 +91,85 @@ export default function Dashboard() {
     }
   }
 
+  // Load total focus time from localStorage
+  useEffect(() => {
+    const savedFocusTime = localStorage.getItem('smartBuddyTotalFocusTime')
+    if (savedFocusTime) {
+      const focusData = JSON.parse(savedFocusTime)
+      const today = new Date().toDateString()
+      if (focusData.date === today) {
+        setTotalFocusTime(focusData.seconds || 0)
+      } else {
+        // Reset for new day
+        setTotalFocusTime(0)
+        localStorage.setItem('smartBuddyTotalFocusTime', JSON.stringify({ date: today, seconds: 0 }))
+      }
+    }
+  }, [])
+
+  // Save total focus time to localStorage
+  useEffect(() => {
+    if (totalFocusTime > 0) {
+      const today = new Date().toDateString()
+      localStorage.setItem('smartBuddyTotalFocusTime', JSON.stringify({ date: today, seconds: totalFocusTime }))
+    }
+  }, [totalFocusTime])
+
+  // Fetch tasks from API
+  const fetchTasks = async () => {
+    if (!user) return
+    try {
+      setTasksLoading(true)
+      const apiTasks = await api.getTasks()
+      // Convert to display format
+      const displayTasks = apiTasks.map(task => ({
+        id: task.id.toString(),
+        title: task.title,
+        completed: task.status === 'completed'
+      }))
+      setTasks(displayTasks)
+    } catch (err) {
+      console.error('Failed to load tasks:', err)
+    } finally {
+      setTasksLoading(false)
+    }
+  }
+
+  // Fetch today's mood from API
+  const fetchTodayMood = async () => {
+    if (!user) return
+    try {
+      setMoodLoading(true)
+      const entries = await api.getMoodEntries()
+      const today = new Date().toDateString()
+      const todayEntry = entries.find(entry => {
+        const entryDate = new Date(entry.created_at).toDateString()
+        return entryDate === today
+      })
+      if (todayEntry) {
+        const moodValue = todayEntry.mood === 'very_happy' ? 'happy' : todayEntry.mood === 'very_sad' ? 'sad' : todayEntry.mood
+        setTodayMood(moodValue)
+      } else {
+        setTodayMood(null)
+      }
+    } catch (err) {
+      console.error('Failed to load mood:', err)
+    } finally {
+      setMoodLoading(false)
+    }
+  }
+
   useEffect(() => {
     if (!user) {
       router.push('/')
       return
     }
 
-    // Load tasks
-    const savedTasks = localStorage.getItem("smartBuddyTasks")
-    if (savedTasks) {
-      setTasks(JSON.parse(savedTasks))
-    }
+    // Fetch tasks from API
+    fetchTasks()
 
-    // Load today's mood
-    const savedMood = localStorage.getItem("smartBuddyTodayMood")
-    if (savedMood) {
-      const moodData = JSON.parse(savedMood)
-      const today = new Date().toDateString()
-      if (moodData.date === today) {
-        setTodayMood(moodData.mood)
-      }
-    }
+    // Fetch today's mood from API
+    fetchTodayMood()
 
     // Fetch motivational quote
     fetchQuote()
@@ -109,7 +182,16 @@ export default function Dashboard() {
       setCurrentTime(new Date())
     }, 1000)
 
-    return () => clearInterval(timer)
+    // Refresh data every 30 seconds
+    const refreshInterval = setInterval(() => {
+      fetchTasks()
+      fetchTodayMood()
+    }, 30000)
+
+    return () => {
+      clearInterval(timer)
+      clearInterval(refreshInterval)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, router])
 
@@ -166,6 +248,33 @@ export default function Dashboard() {
     }
   }
 
+  // Track focus time when timer is running
+  useEffect(() => {
+    if (isRunning && !isBreak && sessionStartTime === null) {
+      const start = new Date()
+      setSessionStartTime(start)
+      // Create focus session in backend
+      api.createFocusSession(start.toISOString(), focusMode).then(session => {
+        setCurrentFocusSessionId(session.id)
+      }).catch(err => {
+        console.error('Failed to create focus session:', err)
+      })
+    } else if (!isRunning && sessionStartTime !== null && currentFocusSessionId) {
+      // Calculate elapsed time and add to total
+      const end = new Date()
+      const elapsed = Math.floor((end.getTime() - sessionStartTime.getTime()) / 1000)
+      setTotalFocusTime(prev => prev + elapsed)
+      
+      // Update focus session in backend
+      api.updateFocusSession(currentFocusSessionId, end.toISOString(), elapsed).catch(err => {
+        console.error('Failed to update focus session:', err)
+      })
+      
+      setSessionStartTime(null)
+      setCurrentFocusSessionId(null)
+    }
+  }, [isRunning, isBreak, sessionStartTime, focusMode, currentFocusSessionId])
+
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null
 
@@ -175,20 +284,46 @@ export default function Dashboard() {
       }, 1000)
     } else if (pomodoroTime === 0) {
       setIsRunning(false)
+      // Save focus time when work session ends
+      if (!isBreak && sessionStartTime && currentFocusSessionId) {
+        const end = new Date()
+        const elapsed = Math.floor((end.getTime() - sessionStartTime.getTime()) / 1000)
+        setTotalFocusTime(prev => prev + elapsed)
+        
+        // Update focus session in backend
+        api.updateFocusSession(currentFocusSessionId, end.toISOString(), elapsed).catch(err => {
+          console.error('Failed to update focus session:', err)
+        })
+        
+        setSessionStartTime(null)
+        setCurrentFocusSessionId(null)
+      }
+      
       // Switch between work and break
       if (isBreak) {
-        setPomodoroTime(25 * 60) // Default to 25 minutes
+        setPomodoroTime(pomodoroModes[focusMode])
         setIsBreak(false)
+        // Show notification: Back to work
+        NotificationService.showWorkResume()
       } else {
-        setPomodoroTime(5 * 60) // Default to 5 minutes
+        setPomodoroTime(breakDuration * 60)
         setIsBreak(true)
+        // Show notification: Time for break
+        NotificationService.showBreakReminder()
       }
     }
 
     return () => {
       if (interval) clearInterval(interval)
     }
-  }, [isRunning, pomodoroTime, isBreak])
+  }, [isRunning, pomodoroTime, isBreak, focusMode, breakDuration, sessionStartTime])
+
+  // Request notification permission on mount
+  useEffect(() => {
+    if (user) {
+      NotificationService.requestPermission()
+    }
+  }, [user])
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
@@ -201,14 +336,47 @@ export default function Dashboard() {
     router.push('/')
   }
 
-  const setMood = (mood: string) => {
-    setTodayMood(mood)
-    const moodData = {
-      date: new Date().toDateString(),
-      mood: mood,
-      timestamp: new Date().toISOString(),
+  const setMood = async (mood: string) => {
+    if (!user) return
+    try {
+      // Map to backend mood values
+      const backendMood = mood === "happy" ? "happy" : mood === "neutral" ? "neutral" : "sad"
+      
+      // Check if today's entry exists
+      const entries = await api.getMoodEntries()
+      const today = new Date().toDateString()
+      const todayEntry = entries.find(entry => {
+        const entryDate = new Date(entry.created_at).toDateString()
+        return entryDate === today
+      })
+      
+      if (todayEntry) {
+        await api.updateMoodEntry(todayEntry.id, backendMood)
+      } else {
+        await api.createMoodEntry(backendMood)
+      }
+      
+      setTodayMood(mood)
+    } catch (err) {
+      console.error('Failed to save mood:', err)
     }
-    localStorage.setItem("smartBuddyTodayMood", JSON.stringify(moodData))
+  }
+
+  const handleTaskToggle = async (taskId: string) => {
+    if (!user) return
+    try {
+      const taskIdNum = parseInt(taskId)
+      const currentTask = tasks.find(t => t.id === taskId)
+      if (!currentTask) return
+
+      const newStatus = currentTask.completed ? 'todo' : 'completed'
+      await api.updateTask(taskIdNum, undefined, undefined, undefined, newStatus)
+      
+      // Refresh tasks
+      fetchTasks()
+    } catch (err) {
+      console.error('Failed to update task:', err)
+    }
   }
 
   const completedTasks = tasks.filter((task) => task.completed).length
@@ -303,8 +471,10 @@ export default function Dashboard() {
             <CardContent className="p-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-sm font-medium text-gray-600">Focus Time</p>
-                  <p className="text-2xl font-bold">{formatTime(pomodoroTime)}</p>
+                  <p className="text-sm font-medium text-gray-600">Total Focus Time</p>
+                  <p className="text-2xl font-bold">
+                    {Math.floor(totalFocusTime / 3600)}h {Math.floor((totalFocusTime % 3600) / 60)}m
+                  </p>
                 </div>
                 <Timer className="h-8 w-8 text-blue-500" />
               </div>
@@ -386,16 +556,106 @@ export default function Dashboard() {
                   <Progress
                     value={
                       isBreak
-                        ? ((5 * 60 - pomodoroTime) / (5 * 60)) * 100
-                        : ((25 * 60 - pomodoroTime) / (25 * 60)) * 100
+                        ? ((breakDuration * 60 - pomodoroTime) / (breakDuration * 60)) * 100
+                        : ((pomodoroModes[focusMode] - pomodoroTime) / pomodoroModes[focusMode]) * 100
                     }
                     className="w-full h-2"
                   />
+                  
+                  {/* Focus Mode Selection */}
+                  {!isBreak && !isRunning && (
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Focus Duration</label>
+                      <div className="flex space-x-2">
+                        <Button
+                          variant={focusMode === 'short' ? 'default' : 'outline'}
+                          size="sm"
+                          onClick={() => {
+                            setFocusMode('short')
+                            setPomodoroTime(pomodoroModes.short)
+                          }}
+                        >
+                          Short (15 min)
+                        </Button>
+                        <Button
+                          variant={focusMode === 'medium' ? 'default' : 'outline'}
+                          size="sm"
+                          onClick={() => {
+                            setFocusMode('medium')
+                            setPomodoroTime(pomodoroModes.medium)
+                          }}
+                        >
+                          Medium (25 min)
+                        </Button>
+                        <Button
+                          variant={focusMode === 'long' ? 'default' : 'outline'}
+                          size="sm"
+                          onClick={() => {
+                            setFocusMode('long')
+                            setPomodoroTime(pomodoroModes.long)
+                          }}
+                        >
+                          Long (45 min)
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Break Duration Selection */}
+                  {isBreak && !isRunning && (
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Break Duration (minutes)</label>
+                      <div className="flex items-center justify-center space-x-2">
+                        <Button
+                          variant={breakDuration === 3 ? 'default' : 'outline'}
+                          size="sm"
+                          onClick={() => {
+                            setBreakDuration(3)
+                            setPomodoroTime(3 * 60)
+                          }}
+                        >
+                          3 min
+                        </Button>
+                        <Button
+                          variant={breakDuration === 5 ? 'default' : 'outline'}
+                          size="sm"
+                          onClick={() => {
+                            setBreakDuration(5)
+                            setPomodoroTime(5 * 60)
+                          }}
+                        >
+                          5 min
+                        </Button>
+                        <Button
+                          variant={breakDuration === 10 ? 'default' : 'outline'}
+                          size="sm"
+                          onClick={() => {
+                            setBreakDuration(10)
+                            setPomodoroTime(10 * 60)
+                          }}
+                        >
+                          10 min
+                        </Button>
+                        <Button
+                          variant={breakDuration === 15 ? 'default' : 'outline'}
+                          size="sm"
+                          onClick={() => {
+                            setBreakDuration(15)
+                            setPomodoroTime(15 * 60)
+                          }}
+                        >
+                          15 min
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="flex justify-center space-x-4">
                     <Button
                       onClick={() => setIsRunning(!isRunning)}
                       size="lg"
                       className="bg-blue-600 hover:bg-blue-700"
+                      disabled={pomodoroTime === 0}
                     >
                       {isRunning ? <Pause className="h-4 w-4 mr-2" /> : <Play className="h-4 w-4 mr-2" />}
                       {isRunning ? "Pause" : "Start"}
@@ -403,7 +663,24 @@ export default function Dashboard() {
                     <Button
                       onClick={() => {
                         setIsRunning(false)
-                        setPomodoroTime(isBreak ? 5 * 60 : 25 * 60)
+                        if (isBreak) {
+                          setPomodoroTime(breakDuration * 60)
+                        } else {
+                          setPomodoroTime(pomodoroModes[focusMode])
+                        }
+                        if (sessionStartTime && currentFocusSessionId) {
+                          const end = new Date()
+                          const elapsed = Math.floor((end.getTime() - sessionStartTime.getTime()) / 1000)
+                          setTotalFocusTime(prev => prev + elapsed)
+                          
+                          // Update focus session in backend
+                          api.updateFocusSession(currentFocusSessionId, end.toISOString(), elapsed).catch(err => {
+                            console.error('Failed to update focus session:', err)
+                          })
+                          
+                          setSessionStartTime(null)
+                          setCurrentFocusSessionId(null)
+                        }
                       }}
                       variant="outline"
                       size="lg"
@@ -477,27 +754,27 @@ export default function Dashboard() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-3">
-                  {tasks.slice(0, 5).map((task) => (
-                    <div key={task.id} className="flex items-center space-x-3">
-                      <input
-                        type="checkbox"
-                        checked={task.completed}
-                        onChange={() => {
-                          const updatedTasks = tasks.map((t) =>
-                            t.id === task.id ? { ...t, completed: !t.completed } : t,
-                          )
-                          setTasks(updatedTasks)
-                          localStorage.setItem("smartBuddyTasks", JSON.stringify(updatedTasks))
-                        }}
-                        className="rounded"
-                      />
-                      <span className={`flex-1 text-sm ${task.completed ? "line-through text-gray-500" : ""}`}>
-                        {task.title}
-                      </span>
+                  {tasksLoading ? (
+                    <div className="flex items-center justify-center py-4">
+                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                      <span className="text-sm text-gray-500">Loading tasks...</span>
                     </div>
-                  ))}
-                  {tasks.length === 0 && (
-                    <p className="text-sm text-gray-500 text-center py-4">No tasks yet. Add some to get started!</p>
+                  ) : tasks.length === 0 ? (
+                    <p className="text-center text-gray-500 py-4">No tasks yet. Create one to get started!</p>
+                  ) : (
+                    tasks.slice(0, 5).map((task) => (
+                      <div key={task.id} className="flex items-center space-x-3">
+                        <input
+                          type="checkbox"
+                          checked={task.completed}
+                          onChange={() => handleTaskToggle(task.id)}
+                          className="rounded"
+                        />
+                        <span className={`flex-1 text-sm ${task.completed ? "line-through text-gray-500" : ""}`}>
+                          {task.title}
+                        </span>
+                      </div>
+                    ))
                   )}
                 </div>
               </CardContent>

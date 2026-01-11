@@ -100,3 +100,5 @@ After setup, try connecting Google Calendar again. The error should be resolved!
 - Make sure redirect URI in `.env` matches exactly with Google Cloud Console
 - Must be: `http://localhost:8000/api/calendar/google/callback/` (with trailing slash)
 
+
+

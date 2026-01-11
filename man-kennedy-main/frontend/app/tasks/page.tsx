@@ -6,10 +6,12 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
-import { ArrowLeft, Plus, CheckSquare, Clock, Trash2, Edit } from "lucide-react"
+import { ArrowLeft, Plus, CheckSquare, Clock, Trash2, Edit, Loader2 } from "lucide-react"
 import Link from "next/link"
+import { api, Task as ApiTask } from "@/lib/api"
+import { useAuth } from "@/lib/auth"
 
-interface Task {
+interface TaskDisplay {
   id: string
   title: string
   completed: boolean
@@ -19,62 +21,126 @@ interface Task {
 }
 
 export default function TaskManager() {
-  const [tasks, setTasks] = useState<Task[]>([])
+  const [tasks, setTasks] = useState<TaskDisplay[]>([])
   const [newTask, setNewTask] = useState("")
   const [filter, setFilter] = useState<"all" | "pending" | "completed">("all")
   const [editingTask, setEditingTask] = useState<string | null>(null)
   const [editTitle, setEditTitle] = useState("")
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const { user } = useAuth()
 
+  // Convert API task to display format
+  const convertToDisplay = (task: ApiTask): TaskDisplay => {
+    return {
+      id: task.id.toString(),
+      title: task.title,
+      completed: task.status === 'completed',
+      createdAt: task.created_at,
+      priority: task.priority,
+      category: 'General', // Backend doesn't have category, using default
+    }
+  }
+
+  // Load tasks from API
   useEffect(() => {
-    const savedTasks = localStorage.getItem("smartBuddyTasks")
-    if (savedTasks) {
-      setTasks(JSON.parse(savedTasks))
-    }
-  }, [])
+    if (!user) return
 
-  const saveTasks = (updatedTasks: Task[]) => {
-    setTasks(updatedTasks)
-    localStorage.setItem("smartBuddyTasks", JSON.stringify(updatedTasks))
-  }
-
-  const addTask = () => {
-    if (!newTask.trim()) return
-
-    const task: Task = {
-      id: Date.now().toString(),
-      title: newTask.trim(),
-      completed: false,
-      createdAt: new Date().toISOString(),
-      priority: "medium",
-      category: "General",
+    const loadTasks = async () => {
+      try {
+        setLoading(true)
+        setError(null)
+        const apiTasks = await api.getTasks()
+        const displayTasks = apiTasks.map(convertToDisplay)
+        setTasks(displayTasks)
+      } catch (err) {
+        console.error('Failed to load tasks:', err)
+        setError(err instanceof Error ? err.message : 'Failed to load tasks')
+      } finally {
+        setLoading(false)
+      }
     }
 
-    saveTasks([...tasks, task])
-    setNewTask("")
+    loadTasks()
+  }, [user])
+
+  const addTask = async () => {
+    if (!newTask.trim() || !user) return
+
+    try {
+      setSaving(true)
+      setError(null)
+      const apiTask = await api.createTask(newTask.trim(), '', 'medium')
+      const displayTask = convertToDisplay(apiTask)
+      setTasks([displayTask, ...tasks])
+      setNewTask("")
+    } catch (err) {
+      console.error('Failed to create task:', err)
+      setError(err instanceof Error ? err.message : 'Failed to create task')
+    } finally {
+      setSaving(false)
+    }
   }
 
-  const toggleTask = (id: string) => {
-    const updatedTasks = tasks.map((task) => (task.id === id ? { ...task, completed: !task.completed } : task))
-    saveTasks(updatedTasks)
+  const toggleTask = async (id: string) => {
+    if (!user) return
+
+    try {
+      setError(null)
+      const taskId = parseInt(id)
+      const currentTask = tasks.find(t => t.id === id)
+      if (!currentTask) return
+
+      const newStatus = currentTask.completed ? 'todo' : 'completed'
+      const apiTask = await api.updateTask(taskId, undefined, undefined, undefined, newStatus)
+      const displayTask = convertToDisplay(apiTask)
+      
+      setTasks(tasks.map(task => task.id === id ? displayTask : task))
+    } catch (err) {
+      console.error('Failed to update task:', err)
+      setError(err instanceof Error ? err.message : 'Failed to update task')
+    }
   }
 
-  const deleteTask = (id: string) => {
-    const updatedTasks = tasks.filter((task) => task.id !== id)
-    saveTasks(updatedTasks)
+  const deleteTask = async (id: string) => {
+    if (!user) return
+
+    try {
+      setError(null)
+      const taskId = parseInt(id)
+      await api.deleteTask(taskId)
+      setTasks(tasks.filter(task => task.id !== id))
+    } catch (err) {
+      console.error('Failed to delete task:', err)
+      setError(err instanceof Error ? err.message : 'Failed to delete task')
+    }
   }
 
-  const startEditing = (task: Task) => {
+  const startEditing = (task: TaskDisplay) => {
     setEditingTask(task.id)
     setEditTitle(task.title)
   }
 
-  const saveEdit = (id: string) => {
-    if (!editTitle.trim()) return
+  const saveEdit = async (id: string) => {
+    if (!editTitle.trim() || !user) return
 
-    const updatedTasks = tasks.map((task) => (task.id === id ? { ...task, title: editTitle.trim() } : task))
-    saveTasks(updatedTasks)
-    setEditingTask(null)
-    setEditTitle("")
+    try {
+      setSaving(true)
+      setError(null)
+      const taskId = parseInt(id)
+      const apiTask = await api.updateTask(taskId, editTitle.trim())
+      const displayTask = convertToDisplay(apiTask)
+      
+      setTasks(tasks.map(task => task.id === id ? displayTask : task))
+      setEditingTask(null)
+      setEditTitle("")
+    } catch (err) {
+      console.error('Failed to update task:', err)
+      setError(err instanceof Error ? err.message : 'Failed to update task')
+    } finally {
+      setSaving(false)
+    }
   }
 
   const cancelEdit = () => {
@@ -218,16 +284,26 @@ export default function TaskManager() {
                 <CardDescription>What would you like to accomplish today?</CardDescription>
               </CardHeader>
               <CardContent>
+                {error && (
+                  <div className="mb-4 p-3 bg-red-100 border border-red-300 rounded text-red-700 text-sm">
+                    {error}
+                  </div>
+                )}
                 <div className="flex space-x-2">
                   <Input
                     placeholder="Enter a new task..."
                     value={newTask}
                     onChange={(e) => setNewTask(e.target.value)}
-                    onKeyPress={(e) => e.key === "Enter" && addTask()}
+                    onKeyPress={(e) => e.key === "Enter" && !saving && addTask()}
                     className="flex-1"
+                    disabled={saving || loading}
                   />
-                  <Button onClick={addTask} disabled={!newTask.trim()}>
-                    <Plus className="h-4 w-4 mr-2" />
+                  <Button onClick={addTask} disabled={!newTask.trim() || saving || loading}>
+                    {saving ? (
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                      <Plus className="h-4 w-4 mr-2" />
+                    )}
                     Add Task
                   </Button>
                 </div>
@@ -245,19 +321,25 @@ export default function TaskManager() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="space-y-3">
-                  {filteredTasks.length === 0 ? (
-                    <div className="text-center py-12">
-                      <CheckSquare className="h-12 w-12 mx-auto mb-4 text-gray-300" />
-                      <p className="text-gray-500 mb-2">
-                        {filter === "all"
-                          ? "No tasks yet. Add your first task above!"
-                          : filter === "pending"
-                            ? "No pending tasks. Great job!"
-                            : "No completed tasks yet. Keep going!"}
-                      </p>
-                    </div>
-                  ) : (
+                {loading ? (
+                  <div className="text-center py-12">
+                    <Loader2 className="h-12 w-12 mx-auto mb-4 text-gray-300 animate-spin" />
+                    <p className="text-gray-500">Loading tasks...</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {filteredTasks.length === 0 ? (
+                      <div className="text-center py-12">
+                        <CheckSquare className="h-12 w-12 mx-auto mb-4 text-gray-300" />
+                        <p className="text-gray-500 mb-2">
+                          {filter === "all"
+                            ? "No tasks yet. Add your first task above!"
+                            : filter === "pending"
+                              ? "No pending tasks. Great job!"
+                              : "No completed tasks yet. Keep going!"}
+                        </p>
+                      </div>
+                    ) : (
                     filteredTasks.map((task) => (
                       <div
                         key={task.id}
@@ -322,8 +404,9 @@ export default function TaskManager() {
                         )}
                       </div>
                     ))
-                  )}
-                </div>
+                    )}
+                  </div>
+                )}
               </CardContent>
             </Card>
 
@@ -338,9 +421,17 @@ export default function TaskManager() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => {
-                        const updatedTasks = tasks.map((task) => ({ ...task, completed: true }))
-                        saveTasks(updatedTasks)
+                      onClick={async () => {
+                        if (!user) return
+                        try {
+                          const pendingTasks = tasks.filter(t => !t.completed)
+                          await Promise.all(pendingTasks.map(t => api.updateTask(parseInt(t.id), undefined, undefined, undefined, 'completed')))
+                          const updatedTasks = tasks.map(t => ({ ...t, completed: true }))
+                          setTasks(updatedTasks)
+                        } catch (err) {
+                          console.error('Failed to mark all complete:', err)
+                          setError(err instanceof Error ? err.message : 'Failed to mark all complete')
+                        }
                       }}
                     >
                       Mark All Complete
@@ -348,9 +439,16 @@ export default function TaskManager() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => {
-                        const updatedTasks = tasks.filter((task) => !task.completed)
-                        saveTasks(updatedTasks)
+                      onClick={async () => {
+                        if (!user) return
+                        try {
+                          const completedTasks = tasks.filter(t => t.completed)
+                          await Promise.all(completedTasks.map(t => api.deleteTask(parseInt(t.id))))
+                          setTasks(tasks.filter(t => !t.completed))
+                        } catch (err) {
+                          console.error('Failed to clear completed:', err)
+                          setError(err instanceof Error ? err.message : 'Failed to clear completed')
+                        }
                       }}
                     >
                       Clear Completed
@@ -358,9 +456,16 @@ export default function TaskManager() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => {
+                      onClick={async () => {
+                        if (!user) return
                         if (confirm("Are you sure you want to delete all tasks?")) {
-                          saveTasks([])
+                          try {
+                            await Promise.all(tasks.map(t => api.deleteTask(parseInt(t.id))))
+                            setTasks([])
+                          } catch (err) {
+                            console.error('Failed to clear all tasks:', err)
+                            setError(err instanceof Error ? err.message : 'Failed to clear all tasks')
+                          }
                         }
                       }}
                     >

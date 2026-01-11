@@ -3,7 +3,7 @@ from rest_framework import generics, permissions, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.conf import settings
-import openai
+import google.generativeai as genai
 import os
 from .models import ChatMessage
 from .serializers import ChatMessageSerializer
@@ -45,41 +45,61 @@ class ChatView(APIView):
                 user=request.user
             ).order_by('-created_at')[:10]
 
-            # Prepare messages for OpenAI (reverse to get chronological order)
-            messages = []
-            for msg in reversed(recent_messages):
-                messages.append({
-                    'role': msg.role,
-                    'content': msg.content
-                })
+            # Configure Gemini API
+            genai.configure(api_key=django_settings.GEMINI_API_KEY)
+            
+            # System instruction for the assistant
+            system_instruction = '''You are a helpful AI assistant for a productivity and wellness app called "Smart Desktop Buddies".
+You help users with:
+- Task management and productivity tips
+- Mood tracking and mental wellness
+- Motivation and goal setting
+- Calendar and time management
+- Mindfulness and meditation guidance
+- General wellness and self-improvement advice
 
-            # Add system prompt if this is the first message
-            if len(messages) == 1:
-                messages.insert(0, {
-                    'role': 'system',
-                    'content': '''You are a helpful AI assistant for a productivity and wellness app called "Smart Desktop Buddies".
-                    You help users with:
-                    - Task management and productivity tips
-                    - Mood tracking and mental wellness
-                    - Motivation and goal setting
-                    - Calendar and time management
-                    - Mindfulness and meditation guidance
-                    - General wellness and self-improvement advice
-
-                    Be friendly, encouraging, and supportive. Keep responses concise but helpful.
-                    If users ask about app features, explain them clearly and suggest how to use them.'''
-                })
-
-            # Call OpenAI API
-            client = openai.OpenAI(api_key= django_settings.OPENAI_API_KEY)
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=messages,
-                max_tokens=500,
-                temperature=0.7
-            )
-
-            assistant_message = response.choices[0].message.content
+Be friendly, encouraging, and supportive. Keep responses concise but helpful.
+If users ask about app features, explain them clearly and suggest how to use them.'''
+            
+            # Get recent messages in chronological order (excluding the current message we just saved)
+            # The most recent message is the one we just saved, so we skip it
+            recent_messages_list = list(reversed(recent_messages[1:])) if len(recent_messages) > 1 else []
+            
+            # Build conversation history for Gemini
+            # Gemini expects alternating user/assistant messages
+            conversation_history = []
+            
+            # Check if this is the first conversation (no previous messages except the one we just saved)
+            is_first_conversation = len(recent_messages_list) == 0
+            
+            # Build conversation history
+            if not is_first_conversation:
+                for msg in recent_messages_list:
+                    if msg.role == 'user':
+                        conversation_history.append({'role': 'user', 'parts': [msg.content]})
+                    elif msg.role == 'assistant':
+                        conversation_history.append({'role': 'model', 'parts': [msg.content]})
+            
+            # Initialize the model - using gemini-1.5-flash (faster and cost-effective)
+            # Alternative: 'gemini-1.5-pro' for better quality
+            model = genai.GenerativeModel(model_name='gemini-3-flash-preview')
+            
+            if is_first_conversation:
+                # First message - include system instruction in the prompt
+                full_prompt = f"{system_instruction}\n\nUser: {user_message}\nAssistant:"
+                response = model.generate_content(full_prompt)
+                assistant_message = response.text
+            else:
+                # Start a chat session with history
+                # Prepend system instruction to the first user message in history
+                if conversation_history and conversation_history[0]['role'] == 'user':
+                    conversation_history[0]['parts'][0] = f"{system_instruction}\n\n{conversation_history[0]['parts'][0]}"
+                
+                chat = model.start_chat(history=conversation_history)
+                
+                # Send the current user message to Gemini
+                response = chat.send_message(user_message)
+                assistant_message = response.text
 
             # Save assistant response
             ChatMessage.objects.create(
@@ -94,7 +114,7 @@ class ChatView(APIView):
             })
 
         except Exception as e:
-            print(f"OpenAI API error: {e}")
+            print(f"Gemini API error: {e}")
             # Fallback response
             fallback_message = "I'm sorry, I'm having trouble connecting right now. Please try again later. " 
 

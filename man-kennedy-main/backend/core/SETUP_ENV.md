@@ -104,3 +104,5 @@ Then try connecting a calendar. The error should be gone!
 - Use `.env.example` as a template
 - In production, use environment variables or secure secret management
 
+
+

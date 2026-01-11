@@ -164,4 +164,5 @@ GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '')
 GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', '')
 GOOGLE_REDIRECT_URI = os.environ.get('GOOGLE_REDIRECT_URI', 'http://localhost:8000/api/calendar/google/callback/')
 ENCRYPTION_KEY = os.environ.get('ENCRYPTION_KEY', '') 
-OPENAI_API_KEY=  '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'
+# Gemini API Configuration
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', 'AIzaSyCgyembUfgnd8ZyflCvdT-E3WZiU1RuJSM')
